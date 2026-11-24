@@ -10,6 +10,8 @@
 //! `examples/probe_orientation.rs` prints the same measurement as a table when
 //! something here fails and the per-value detail is wanted.
 
+#![cfg(target_os = "macos")]
+
 use tohdr_core::{
     heif_transform, EncodeOptions, Flavor, GainMapEncoder, GainMapMeta, GainPlane, Rgb,
 };

@@ -1,7 +1,7 @@
 //! hpvca configuration and pixel packing for [`crate::PortableEngine`].
 //!
-//! Both planes use `ParallelismStrategy::TilesWpp`: it saturates cores like the
-//! gridded default while still producing exactly one coded image item.
+//! Both planes use `ParallelismStrategy::Wpp` to produce one coded image item.
+//! hpvca's combined HEVC tiles and WPP decode incorrectly in FFmpeg and libheif.
 //! [`tohdr_heif::HeifFile::coded_image`] refuses a `grid`, since reassembling
 //! tiles is a re-encode rather than a remux, so a gridding strategy would make
 //! the engine unusable and not merely slow.
@@ -37,7 +37,7 @@ pub(crate) fn choose_base_chroma(base_quality: u8) -> ChromaFormat {
     }
 }
 
-/// Shared config: quality plus the `TilesWpp` requirement from the module docs.
+/// Shared config: quality plus the single-item WPP mode from the module docs.
 /// `chroma` matters only on the RGB path; the gray path ignores it.
 ///
 /// SAO is off because hpvca runs an analysis encode before the real one, roughly
@@ -47,7 +47,7 @@ pub(crate) fn choose_base_chroma(base_quality: u8) -> ChromaFormat {
 pub(crate) fn config_for(quality: u8, chroma: ChromaFormat) -> EncodeConfig {
     EncodeConfig::default()
         .with_quality(quality.clamp(1, 100))
-        .with_parallelism(ParallelismStrategy::TilesWpp)
+        .with_parallelism(ParallelismStrategy::Wpp)
         .with_chroma(chroma)
         .with_sao(false)
 }
@@ -137,7 +137,16 @@ impl PlaneCodec for HpvcaCodec {
         // placed next to the gain plane in one file.
         let heic =
             encode_base_heic(base, quality).map_err(|e| crate::Error::Encode(e.to_string()))?;
-        Ok(tohdr_heif::coded_image_from_heic(&heic, "base")?)
+        let mut coded = tohdr_heif::coded_image_from_heic(&heic, "base")?;
+        // hpvca's SPS crops in chroma units. For an odd 4:2:0 dimension the
+        // decoded plane includes one padded pixel at the right or bottom edge.
+        // Its own HEIF writer reports the input dimensions instead. Give the
+        // muxer the actual plane size so it can signal that the padding is cropped.
+        if coded.chroma == tohdr_heif::Chroma::Yuv420 {
+            coded.width += coded.width % 2;
+            coded.height += coded.height % 2;
+        }
+        Ok(coded)
     }
 
     fn encode_gain(&self, gain: &GainPlane, quality: u8) -> Result<CodedImage, crate::Error> {

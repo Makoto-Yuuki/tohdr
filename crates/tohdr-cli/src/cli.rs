@@ -9,6 +9,11 @@ use tohdr_core::encode::parse_size;
 
 use crate::engine::EngineKind;
 
+#[cfg(target_os = "macos")]
+const DEFAULT_ENGINE: &str = "apple";
+#[cfg(not(target_os = "macos"))]
+const DEFAULT_ENGINE: &str = "hpvca";
+
 #[derive(Parser, Debug)]
 #[command(name = "tohdr", version, about = "Produce HDR gain-map HEICs")]
 pub struct Cli {
@@ -24,10 +29,13 @@ pub enum Command {
     /// be parallelized.
     Batch(BatchArgs),
     /// Report what's actually in a HEIC's gain map, both flavors.
+    #[cfg(target_os = "macos")]
     Inspect(InspectArgs),
     /// Check a file's gain map against the invariants a correct capture holds.
+    #[cfg(target_os = "macos")]
     Verify(VerifyArgs),
     /// Compare the available engines on one input.
+    #[cfg(target_os = "macos")]
     Bench(BenchArgs),
 }
 
@@ -92,7 +100,7 @@ pub struct ConvertArgs {
     pub flavor: Flavor,
 
     /// Which backend encodes and muxes.
-    #[arg(long, default_value = "apple", value_parser = parse_engine)]
+    #[arg(long, default_value = DEFAULT_ENGINE, value_parser = parse_engine)]
     pub engine: EngineKind,
 
     /// Target output size, e.g. `4MB`, `4MiB`, `3.5m`, `1500000`. Triggers a
@@ -154,6 +162,10 @@ pub struct ConvertArgs {
     #[arg(long = "maker-note-from", value_name = "FILE")]
     pub maker_note_from: Option<PathBuf>,
 
+    /// Require a Lightroom HDR TIFF with an embedded gain map before encoding.
+    #[arg(long)]
+    pub require_lightroom_gain_map: bool,
+
     /// Emit a machine-readable JSON result on stdout instead of text.
     #[arg(long)]
     pub json: bool,
@@ -178,7 +190,7 @@ pub struct BatchArgs {
     #[arg(long, default_value = "both", value_parser = parse_flavor)]
     pub flavor: Flavor,
 
-    #[arg(long, default_value = "apple", value_parser = parse_engine)]
+    #[arg(long, default_value = DEFAULT_ENGINE, value_parser = parse_engine)]
     pub engine: EngineKind,
 
     /// Target output size per file, e.g. `4MB`.
@@ -210,6 +222,7 @@ pub struct BatchArgs {
     /// `tohdr-apple/examples/probe_vt_session_reuse.rs`. This flag exists so
     /// that claim can be re-measured rather than taken on faith, and as an
     /// escape hatch if some future VideoToolbox disagrees.
+    #[cfg(target_os = "macos")]
     #[arg(long)]
     pub no_session_reuse: bool,
 
@@ -242,11 +255,13 @@ impl BatchArgs {
             // folder would graft the wrong camera's `MakerNote` into every photo
             // but the first.
             maker_note_from: None,
+            require_lightroom_gain_map: false,
             json: false,
         }
     }
 }
 
+#[cfg(target_os = "macos")]
 #[derive(clap::Args, Debug)]
 pub struct InspectArgs {
     pub file: PathBuf,
@@ -255,6 +270,7 @@ pub struct InspectArgs {
     pub json: bool,
 }
 
+#[cfg(target_os = "macos")]
 #[derive(clap::Args, Debug)]
 pub struct VerifyArgs {
     pub file: PathBuf,
@@ -268,6 +284,7 @@ pub struct VerifyArgs {
     pub json: bool,
 }
 
+#[cfg(target_os = "macos")]
 #[derive(clap::Args, Debug)]
 pub struct BenchArgs {
     pub input: PathBuf,
@@ -346,7 +363,7 @@ mod tests {
         match cli.command {
             Command::Convert(a) => {
                 assert_eq!(a.flavor, Flavor::Both);
-                assert_eq!(a.engine, EngineKind::Apple);
+                assert_eq!(a.engine.to_string(), DEFAULT_ENGINE);
                 assert_eq!(a.quality, 85);
                 assert_eq!(a.min_quality, 40);
                 assert_eq!(a.tone_map, ToneMapKind::Reinhard);
@@ -372,14 +389,16 @@ mod tests {
             "--flavor",
             "ios",
             "--engine",
-            "videotoolbox",
+            "hpvca",
+            "--require-lightroom-gain-map",
         ])
         .unwrap();
         match cli.command {
             Command::Convert(a) => {
                 assert_eq!(a.max_size, Some(4_000_000));
                 assert_eq!(a.flavor, Flavor::Iso);
-                assert_eq!(a.engine, EngineKind::VideoToolbox);
+                assert_eq!(a.engine, EngineKind::Hpvca);
+                assert!(a.require_lightroom_gain_map);
             }
             _ => panic!("expected Convert"),
         }
@@ -394,6 +413,7 @@ mod tests {
         assert!(err.to_string().contains("not a number"));
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn verify_default_against_is_none() {
         let cli = Cli::try_parse_from(["tohdr", "verify", "f.heic"]).unwrap();
@@ -403,6 +423,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn bench_defaults() {
         let cli = Cli::try_parse_from(["tohdr", "bench", "in.heic"]).unwrap();

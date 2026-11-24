@@ -18,9 +18,10 @@
 
 use std::path::Path;
 
-use tohdr_apple::vtenc::VideoToolboxCodec;
-use tohdr_apple::AppleEngine;
+#[cfg(target_os = "macos")]
+use tohdr_apple::{AppleEngine, vtenc::VideoToolboxCodec};
 use tohdr_core::{EncodeOptions, GainMapEncoder, GainMapMeta, GainPlane, HdrRgb, Primaries, Rgb};
+#[cfg(target_os = "macos")]
 use tohdr_heif::MuxEngine;
 use tohdr_portable::PortableEngine;
 
@@ -29,8 +30,10 @@ use crate::panic_guard::catch;
 /// Which backend to use. Mirrors `--engine`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EngineKind {
+    #[cfg(target_os = "macos")]
     Apple,
     /// Engine B with the best plane codec available for the job.
+    #[cfg(target_os = "macos")]
     VideoToolbox,
     /// Engine B pinned to the pure-Rust codec.
     Hpvca,
@@ -39,14 +42,21 @@ pub enum EngineKind {
 impl EngineKind {
     pub fn parse(s: &str) -> Result<Self, String> {
         match s.to_ascii_lowercase().as_str() {
+            #[cfg(target_os = "macos")]
             "apple" => Ok(EngineKind::Apple),
+            #[cfg(target_os = "macos")]
             "videotoolbox" => Ok(EngineKind::VideoToolbox),
             // "software" reads better than the codec's name at a call site that
             // only means "not the hardware one".
             "hpvca" | "software" => Ok(EngineKind::Hpvca),
+            #[cfg(not(target_os = "macos"))]
+            "apple" | "videotoolbox" => Err(format!("{s} requires macOS; use hpvca")),
+            #[cfg(target_os = "macos")]
             other => Err(format!(
                 "unknown engine {other:?} (expected apple, videotoolbox, or hpvca)"
             )),
+            #[cfg(not(target_os = "macos"))]
+            other => Err(format!("unknown engine {other:?} (expected hpvca)")),
         }
     }
 }
@@ -54,7 +64,9 @@ impl EngineKind {
 impl std::fmt::Display for EngineKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
+            #[cfg(target_os = "macos")]
             EngineKind::Apple => "apple",
+            #[cfg(target_os = "macos")]
             EngineKind::VideoToolbox => "videotoolbox",
             EngineKind::Hpvca => "hpvca",
         })
@@ -65,6 +77,7 @@ impl std::fmt::Display for EngineKind {
 ///
 /// Returned rather than logged so the caller decides whether it is worth a line
 /// on stderr.
+#[cfg(target_os = "macos")]
 pub fn hardware_unavailable_because(base: &Rgb, base_quality: u8) -> Option<String> {
     if let Err(why) = VideoToolboxCodec::supports(base) {
         return Some(why);
@@ -85,8 +98,10 @@ pub fn hardware_unavailable_because(base: &Rgb, base_quality: u8) -> Option<Stri
 /// [`catch`] so an unfinished engine reports "not yet implemented" instead of
 /// panicking the whole process.
 pub enum Engine {
+    #[cfg(target_os = "macos")]
     Apple(AppleEngine),
     /// Engine B on the platform media block.
+    #[cfg(target_os = "macos")]
     VideoToolbox(MuxEngine<VideoToolboxCodec>),
     /// Engine B on the pure-Rust codec.
     Hpvca(PortableEngine),
@@ -98,7 +113,9 @@ impl Engine {
     /// job; use [`Engine::for_job`] where the base image is already in hand.
     pub fn new(kind: EngineKind) -> Self {
         match kind {
+            #[cfg(target_os = "macos")]
             EngineKind::Apple => Engine::Apple(AppleEngine),
+            #[cfg(target_os = "macos")]
             EngineKind::VideoToolbox => Engine::VideoToolbox(MuxEngine::new(VideoToolboxCodec)),
             EngineKind::Hpvca => Engine::Hpvca(PortableEngine),
         }
@@ -107,14 +124,14 @@ impl Engine {
     /// Build an engine for a specific job, downgrading Engine B's codec when the
     /// hardware path cannot serve it. Returns the reason alongside, so the
     /// caller can say so.
-    pub fn for_job(kind: EngineKind, base: &Rgb, base_quality: u8) -> (Self, Option<String>) {
-        if kind != EngineKind::VideoToolbox {
-            return (Engine::new(kind), None);
+    pub fn for_job(kind: EngineKind, _base: &Rgb, _base_quality: u8) -> (Self, Option<String>) {
+        #[cfg(target_os = "macos")]
+        if kind == EngineKind::VideoToolbox {
+            if let Some(why) = hardware_unavailable_because(_base, _base_quality) {
+                return (Engine::Hpvca(PortableEngine), Some(why));
+            }
         }
-        match hardware_unavailable_because(base, base_quality) {
-            Some(why) => (Engine::Hpvca(PortableEngine), Some(why)),
-            None => (Engine::new(kind), None),
-        }
+        (Engine::new(kind), None)
     }
 
     /// Decode a source (plain HDR file or existing gain-map HEIC) into
@@ -145,7 +162,9 @@ impl Engine {
             Ok(hdr)
         };
         match self {
+            #[cfg(target_os = "macos")]
             Engine::Apple(_) => catch(name, "load_hdr", || tohdr_apple::load_hdr_in(path, primaries)),
+            #[cfg(target_os = "macos")]
             Engine::VideoToolbox(_) => catch(name, "load_hdr", || match portable(path) {
                 Err(tohdr_portable::Error::UnsupportedInput(_)) => {
                     tohdr_apple::load_hdr_in(path, primaries)
@@ -162,10 +181,9 @@ impl Engine {
     pub fn load_sdr(&self, path: &Path) -> anyhow::Result<Rgb> {
         let name = self.name();
         match self {
+            #[cfg(target_os = "macos")]
             Engine::Apple(_) => catch(name, "load_sdr", || tohdr_apple::load_sdr(path)),
-            Engine::VideoToolbox(_) | Engine::Hpvca(_) => {
-                catch(name, "load_sdr", || tohdr_portable::load_sdr(path))
-            }
+            _ => catch(name, "load_sdr", || tohdr_portable::load_sdr(path)),
         }
     }
 }
@@ -175,7 +193,9 @@ impl GainMapEncoder for Engine {
 
     fn name(&self) -> &'static str {
         match self {
+            #[cfg(target_os = "macos")]
             Engine::Apple(e) => e.name(),
+            #[cfg(target_os = "macos")]
             Engine::VideoToolbox(e) => e.name(),
             Engine::Hpvca(e) => e.name(),
         }
@@ -183,7 +203,9 @@ impl GainMapEncoder for Engine {
 
     fn metadata_support(&self) -> tohdr_core::MetadataSupport {
         match self {
+            #[cfg(target_os = "macos")]
             Engine::Apple(e) => e.metadata_support(),
+            #[cfg(target_os = "macos")]
             Engine::VideoToolbox(e) => e.metadata_support(),
             Engine::Hpvca(e) => e.metadata_support(),
         }
@@ -198,7 +220,9 @@ impl GainMapEncoder for Engine {
     ) -> anyhow::Result<Vec<u8>> {
         let name = self.name();
         match self {
+            #[cfg(target_os = "macos")]
             Engine::Apple(e) => catch(name, "encode", || e.encode(base, gain, meta, opts)),
+            #[cfg(target_os = "macos")]
             Engine::VideoToolbox(e) => catch(name, "encode", || e.encode(base, gain, meta, opts)),
             Engine::Hpvca(e) => catch(name, "encode", || e.encode(base, gain, meta, opts)),
         }
@@ -220,14 +244,18 @@ mod tests {
 
     #[test]
     fn parses_known_engines() {
-        assert_eq!(EngineKind::parse("apple").unwrap(), EngineKind::Apple);
-        assert_eq!(EngineKind::parse("APPLE").unwrap(), EngineKind::Apple);
-        assert_eq!(
-            EngineKind::parse("videotoolbox").unwrap(),
-            EngineKind::VideoToolbox
-        );
         assert_eq!(EngineKind::parse("hpvca").unwrap(), EngineKind::Hpvca);
         assert_eq!(EngineKind::parse("software").unwrap(), EngineKind::Hpvca);
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(EngineKind::parse("APPLE").unwrap(), EngineKind::Apple);
+            assert_eq!(EngineKind::parse("videotoolbox").unwrap(), EngineKind::VideoToolbox);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert!(EngineKind::parse("apple").is_err());
+            assert!(EngineKind::parse("videotoolbox").is_err());
+        }
     }
 
     #[test]
@@ -245,14 +273,18 @@ mod tests {
 
     #[test]
     fn names_match_backends() {
-        assert_eq!(Engine::new(EngineKind::Apple).name(), "apple-imageio");
-        assert_eq!(
-            Engine::new(EngineKind::VideoToolbox).name(),
-            "hardware-videotoolbox"
-        );
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(Engine::new(EngineKind::Apple).name(), "apple-imageio");
+            assert_eq!(
+                Engine::new(EngineKind::VideoToolbox).name(),
+                "hardware-videotoolbox"
+            );
+        }
         assert_eq!(Engine::new(EngineKind::Hpvca).name(), "portable-hpvca");
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn eight_bit_base_at_default_quality_gets_hardware() {
         let (engine, why) = Engine::for_job(EngineKind::VideoToolbox, &base_8bit(), 85);
@@ -262,6 +294,7 @@ mod tests {
 
     /// The media block's base path is 8-bit; a deeper source must not be
     /// silently truncated to reach it.
+    #[cfg(target_os = "macos")]
     #[test]
     fn deeper_base_falls_back_to_the_software_codec() {
         let base = Rgb {
@@ -276,6 +309,7 @@ mod tests {
     }
 
     /// Asking for 4:4:4 chroma is asking for the codec that can do it.
+    #[cfg(target_os = "macos")]
     #[test]
     fn quality_that_wants_444_falls_back_to_the_software_codec() {
         let (engine, why) = Engine::for_job(EngineKind::VideoToolbox, &base_8bit(), 96);
@@ -291,6 +325,7 @@ mod tests {
             Engine::for_job(EngineKind::Hpvca, &base_8bit(), 85).0.name(),
             "portable-hpvca"
         );
+        #[cfg(target_os = "macos")]
         assert_eq!(
             Engine::for_job(EngineKind::Apple, &base_8bit(), 96).0.name(),
             "apple-imageio"

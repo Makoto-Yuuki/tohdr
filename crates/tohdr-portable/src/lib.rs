@@ -5,10 +5,9 @@
 //! [`tohdr_heif::mux`] then assembles them into one multi-item gain-map file.
 //!
 //! `spikes/hpvca-probe` established the substrate: hpvca output decodes through
-//! Apple ImageIO at 8- and 10-bit, runs ~38 MP/s at 21.8 MP, and with
-//! `ParallelismStrategy::TilesWpp` yields exactly one image item (no grid, no
-//! `iref`) at the same speed as the gridded default and a smaller file — which
-//! is what makes it remuxable without reassembling tiles.
+//! Apple ImageIO at 8- and 10-bit. We use single-item WPP for compatibility
+//! with Windows Imaging, FFmpeg and libheif, and to remux without reassembling
+//! a HEIF grid.
 
 use std::path::Path;
 
@@ -169,5 +168,40 @@ mod tests {
         let engine = PortableEngine;
         let bytes = engine.encode(&base, &gain, &meta, &opts).expect("mux");
         assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn odd_420_dimensions_get_a_clean_aperture() {
+        let base = Rgb {
+            width: 65,
+            height: 49,
+            bits: 8,
+            data: scene_rgb8(65, 49),
+        };
+        let gain = GainPlane {
+            width: 33,
+            height: 25,
+            data: vec![128; 33 * 25],
+        };
+        let opts = EncodeOptions {
+            flavor: tohdr_core::Flavor::Iso,
+            base_quality: 85,
+            ..EncodeOptions::default()
+        };
+        let bytes = PortableEngine
+            .encode(&base, &gain, &GainMapMeta::default(), &opts)
+            .unwrap();
+        let heif = tohdr_heif::HeifFile::parse(&bytes).unwrap();
+        let primary = heif.coded_image(heif.primary_item().unwrap()).unwrap();
+        assert_eq!((primary.width, primary.height), (66, 50));
+        let tmap = heif.items().iter().find(|item| item.item_type == *b"tmap").unwrap();
+        assert_eq!((tmap.width, tmap.height), (Some(65), Some(49)));
+
+        let aperture = bytes.windows(4).position(|fourcc| fourcc == b"clap").unwrap();
+        let fields: Vec<_> = bytes[aperture + 4..aperture + 36]
+            .chunks_exact(4)
+            .map(|field| i32::from_be_bytes(field.try_into().unwrap()))
+            .collect();
+        assert_eq!(fields, [65, 1, 49, 1, -1, 2, -1, 2]);
     }
 }

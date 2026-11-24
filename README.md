@@ -131,6 +131,9 @@ criterion 8 in [`docs/acceptance-criteria.md`](docs/acceptance-criteria.md).
 
 ## Lightroom Classic plugin
 
+For a Windows x64 build that exports ISO 21496-1 gain-map HEICs, see the
+[Windows installation and build guide](lightroom/README-Windows.md).
+
 `lightroom/tohdr.lrplugin` exports gain-map HEICs by shelling out to this CLI,
 with flavor, engine, quality, tone map, and a maximum output size in the export
 dialog. It runs inside Lightroom Classic 15.4.1: a 60.2 MP Sony raw exports to a

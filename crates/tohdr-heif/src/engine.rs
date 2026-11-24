@@ -166,7 +166,7 @@ impl<C: PlaneCodec + Sync> GainMapEncoder for MuxEngine<C> {
             orientation: opts.orientation,
             clli: None,
         };
-        Ok(crate::mux(&req)?)
+        Ok(crate::write::mux(&req, (base.width, base.height))?)
     }
 }
 

@@ -149,7 +149,7 @@ pub struct MuxRequest {
 ///   `[base, gain]`, carrying the C.2.2 payload prefixed by its `ToneMapImage`
 ///   version byte, plus the `tmap` compatible brand in `ftyp`
 pub fn mux(req: &MuxRequest) -> Result<Vec<u8>> {
-    write::mux(req)
+    write::mux(req, (req.base.width, req.base.height))
 }
 
 /// Apple's auxiliary-image type URN for a gain map, present since 2020.

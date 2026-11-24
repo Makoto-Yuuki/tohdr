@@ -110,7 +110,10 @@ fn check_output_collisions(inputs: &[PathBuf], dir: &Path) -> anyhow::Result<()>
     let mut claims: std::collections::HashMap<PathBuf, Vec<&PathBuf>> =
         std::collections::HashMap::new();
     for input in inputs {
-        claims.entry(output_for(input, dir)).or_default().push(input);
+        let output = output_for(input, dir);
+        #[cfg(windows)]
+        let output = PathBuf::from(output.to_string_lossy().to_lowercase());
+        claims.entry(output).or_default().push(input);
     }
     let mut clashes: Vec<_> = claims.iter().filter(|(_, v)| v.len() > 1).collect();
     if clashes.is_empty() {
@@ -118,7 +121,8 @@ fn check_output_collisions(inputs: &[PathBuf], dir: &Path) -> anyhow::Result<()>
     }
     clashes.sort_by_key(|(out, _)| *out);
     let mut msg = format!("{} output name(s) claimed by more than one input:", clashes.len());
-    for (out, sources) in clashes {
+    for (_, sources) in clashes {
+        let out = output_for(sources[0], dir);
         msg.push_str(&format!("\n  {} <- ", out.display()));
         let names: Vec<String> = sources.iter().map(|p| p.display().to_string()).collect();
         msg.push_str(&names.join(", "));
@@ -133,6 +137,7 @@ fn default_jobs(cores: usize) -> usize {
 }
 
 pub fn run(args: BatchArgs) -> anyhow::Result<i32> {
+    #[cfg(target_os = "macos")]
     if args.no_session_reuse {
         tohdr_apple::vtenc::set_session_reuse(false);
     }
@@ -316,7 +321,8 @@ mod tests {
             PathBuf::from("/shoot-a/DSC07747.ARW"),
         ];
         let err = check_output_collisions(&inputs, Path::new("/out")).unwrap_err().to_string();
-        assert!(err.contains("/out/DSC07746.heic"), "{err}");
+        let output = Path::new("/out").join("DSC07746.heic");
+        assert!(err.contains(&*output.to_string_lossy()), "{err}");
         assert!(err.contains("/shoot-a/DSC07746.ARW"), "{err}");
         assert!(err.contains("/shoot-b/DSC07746.arw"), "{err}");
         assert!(!err.contains("DSC07747"), "the file that is fine must not be named: {err}");
@@ -327,6 +333,13 @@ mod tests {
         // `raw.tif` and `raw.png` are different inputs but one output name.
         let inputs = vec![PathBuf::from("/src/raw.tif"), PathBuf::from("/src/raw.png")];
         assert!(check_output_collisions(&inputs, Path::new("/out")).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn differently_cased_stems_still_collide_on_windows() {
+        let inputs = vec![PathBuf::from("a/Photo.tif"), PathBuf::from("b/photo.tif")];
+        assert!(check_output_collisions(&inputs, Path::new("out")).is_err());
     }
 
     #[test]

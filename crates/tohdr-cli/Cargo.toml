@@ -13,9 +13,11 @@ path = "src/main.rs"
 [dependencies]
 tohdr-core.workspace = true
 tohdr-heif.workspace = true
-tohdr-apple.workspace = true
 tohdr-portable.workspace = true
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+tohdr-apple.workspace = true

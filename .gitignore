@@ -8,6 +8,8 @@
 *.HEIC
 *.jpg
 *.png
+*.tif
+*.tiff
 !assets/**
 
 # Adobe's Lightroom SDK and its two guides, kept in docs/ because every

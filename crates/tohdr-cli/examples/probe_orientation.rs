@@ -12,12 +12,14 @@
 //! cargo run --release -p tohdr-cli --example probe_orientation
 //! ```
 
+#[cfg(target_os = "macos")]
 use tohdr_core::{
     heif_transform, EncodeOptions, Flavor, GainMapEncoder, GainMapMeta, GainPlane, Rgb,
 };
 
 /// A gradient rather than a flat fill: a flat image would round-trip through any
 /// transform, correct or not.
+#[cfg(target_os = "macos")]
 fn inputs() -> (Rgb, GainPlane, GainMapMeta) {
     const W: u32 = 64;
     const H: u32 = 32;
@@ -45,6 +47,7 @@ fn inputs() -> (Rgb, GainPlane, GainMapMeta) {
     )
 }
 
+#[cfg(target_os = "macos")]
 fn main() {
     let (base, gain, meta) = inputs();
     println!("exif in   engine            irot  imir   read back   verdict");
@@ -100,4 +103,10 @@ fn main() {
         println!("{bad} of 16 disagree — the mapping or the application order is wrong");
         std::process::exit(1);
     }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn main() {
+    eprintln!("The orientation probe requires macOS ImageIO.");
+    std::process::exit(1);
 }

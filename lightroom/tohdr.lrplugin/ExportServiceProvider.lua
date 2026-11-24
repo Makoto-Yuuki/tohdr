@@ -20,6 +20,9 @@ local LrTasks = import 'LrTasks'
 
 local TohdrCli = require 'TohdrCli'
 local TohdrExportDialog = require 'TohdrExportDialog'
+local TohdrWindows = WIN_ENV and require 'TohdrWindows'
+local LrExportSession = WIN_ENV and import 'LrExportSession'
+local LrFunctionContext = WIN_ENV and import 'LrFunctionContext'
 
 local export_service_provider = {}
 
@@ -28,6 +31,10 @@ local export_service_provider = {}
 -- from File > Export entirely. This design is export-shaped: no publish
 -- callback exists in this file.
 export_service_provider.hideSections = { 'fileNaming', 'fileSettings', 'imageSettings' }
+if WIN_ENV then
+	export_service_provider.hideSections = { 'fileSettings', 'imageSettings' }
+	export_service_provider.canExportToTemporaryLocation = false
+end
 export_service_provider.allowFileFormats = { 'TIFF' }
 export_service_provider.allowColorSpaces = nil
 export_service_provider.canExportVideo = false
@@ -73,6 +80,13 @@ function export_service_provider.updateExportSettings(export_settings)
 	export_settings.LR_export_bitDepth = 16
 	export_settings.LR_export_bitDepthOthers = 16
 	export_settings.LR_tiff_compressionMethod = 'compressionMethod_None'
+	if WIN_ENV then
+		export_settings.LR_maximumCompatibility = true
+		-- Lightroom applies this to the intermediate TIFF, before the plug-in
+		-- checks for a collision on the final HEIC.
+		export_settings.LR_collisionHandling = 'rename'
+		export_settings.LR_reimportExportedPhoto = false
+	end
 end
 
 --- Locate the binary using the pure-Lua policy in TohdrCli, supplying it the
@@ -82,7 +96,8 @@ end
 --- read PATH anyway.
 local function find_binary(property_table)
 	local plugin_dir = _PLUGIN and _PLUGIN.path or nil
-	local bundled = plugin_dir and LrPathUtils.child(plugin_dir, 'tohdr') or nil
+	local executable = WIN_ENV and 'tohdr.exe' or 'tohdr'
+	local bundled = plugin_dir and LrPathUtils.child(plugin_dir, executable) or nil
 
 	return TohdrCli.locate_binary {
 		user_binary_path = property_table.tohdr_binaryPath,
@@ -102,13 +117,13 @@ end
 --- (seconds since 2001, fractional) because the sandbox is missing parts of
 --- `os` -- `os.getenv` crashed an export here.
 local log_counter = 0
-local function temp_log_path()
+local function temp_path(directory, extension)
 	log_counter = log_counter + 1
 	local entropy = tostring({}):gsub('%W', '')
 	return LrPathUtils.child(
-		LrPathUtils.getStandardFilePath('temp'),
-		string.format('tohdr-%s-%d-%d.log',
-			entropy, log_counter, math.floor(LrDate.currentTime()))
+		directory,
+		string.format('.tohdr-%s-%d-%d.%s',
+			entropy, log_counter, math.floor(LrDate.currentTime()), extension)
 	)
 end
 
@@ -165,17 +180,164 @@ local function original_path(rendition)
 	return path
 end
 
-local function run_capturing(command_line)
-	local log_path = temp_log_path()
-	local full = command_line .. ' >' .. TohdrCli.quote_arg(log_path) .. ' 2>&1'
-	local status = LrTasks.execute(full)
+local function run_capturing(binary, args)
+	local log_path = temp_path(LrPathUtils.getStandardFilePath('temp'), 'log')
+	local command
+	if WIN_ENV then
+		command = TohdrWindows.capture_command(binary, args, log_path)
+	else
+		command = TohdrCli.build_command_line(binary, args)
+			.. ' >' .. TohdrCli.quote_arg(log_path) .. ' 2>&1'
+	end
+	local ok, status = LrTasks.pcall(LrTasks.execute, command)
 
 	local output = ''
 	if LrFileUtils.exists(log_path) then
 		output = LrFileUtils.readFile(log_path) or ''
 		LrFileUtils.delete(log_path)
 	end
+	if not ok then
+		return 1, tostring(status)
+	end
 	return status, output
+end
+
+local function heic_path(rendition)
+	return LrPathUtils.removeExtension(rendition.destinationPath) .. '.heic'
+end
+
+local function convert_on_windows(binary, rendered_path, destination, quality, progress)
+	if LrFileUtils.exists(destination) then
+		return 'A file already exists at ' .. destination
+	end
+	local directory = LrPathUtils.parent(destination)
+	if LrFileUtils.exists(directory) ~= 'directory' then
+		local created, reason = LrFileUtils.createAllDirectories(directory)
+		if not created then
+			return 'Could not create the HEIC export directory: ' .. tostring(reason)
+		end
+	end
+	local staged = temp_path(directory, 'tmp')
+	local args = TohdrCli.build_convert_args({
+		tohdr_engine = 'hpvca',
+		tohdr_flavor = 'iso',
+		tohdr_quality = quality or 85,
+		tohdr_gainSubsample = 2,
+	}, rendered_path, staged)
+	table.insert(args, '--require-lightroom-gain-map')
+
+	local ok, failure, advisories = LrTasks.pcall(function()
+		local status, output = run_capturing(binary, args)
+		if progress:isCanceled() then
+			return
+		end
+		if status ~= 0 then
+			return TohdrCli.summarize_failure(status, output)
+		end
+		if LrFileUtils.exists(staged) ~= 'file'
+			or TohdrCli.gain_map_source(output) ~= 'lightroom-embedded' then
+			return 'tohdr did not produce a HEIC from the Lightroom HDR gain map.'
+		end
+		if progress:isCanceled() then
+			return
+		end
+		local moved, reason = LrFileUtils.move(staged, destination)
+		if not moved then
+			if LrFileUtils.exists(destination) then
+				return 'A file already exists at ' .. destination
+			end
+			return 'Could not move the HEIC to ' .. destination .. ': ' .. tostring(reason)
+		end
+		return nil, TohdrCli.advisories(output)
+	end)
+	if LrFileUtils.exists(staged) == 'file' then
+		LrFileUtils.delete(staged)
+	end
+	if not ok then
+		return tostring(failure)
+	end
+	return failure, advisories
+end
+
+local function render_in_scratch(context, property_table, photo)
+	local scratch = temp_path(LrPathUtils.getStandardFilePath('temp'), 'render')
+	local created, reason = LrFileUtils.createAllDirectories(scratch)
+	if not created then
+		return nil, 'Could not create the temporary render directory: ' .. tostring(reason)
+	end
+	context:addCleanupHandler(function() LrFileUtils.delete(scratch) end)
+
+	local settings = {}
+	-- Lightroom stores export choices in an observable table. Its iterator
+	-- exposes metadata settings, including the option to remove GPS.
+	local iterate = property_table.pairs or pairs
+	for key, value in iterate(property_table) do
+		if type(key) == 'string' and key:sub(1, 3) == 'LR_' then
+			settings[key] = value
+		end
+	end
+	export_service_provider.updateExportSettings(settings)
+	settings.LR_export_destinationType = 'specificFolder'
+	settings.LR_export_destinationPathPrefix = scratch
+	settings.LR_export_useSubfolder = false
+	settings.LR_renamingTokensOn = false
+	local session = LrExportSession { photosToExport = { photo }, exportSettings = settings }
+	session:doExportOnCurrentTask()
+	for _, rendition in session:renditions() do
+		local ok, path_or_error = rendition:waitForRender()
+		if ok then return path_or_error end
+		return nil, path_or_error
+	end
+	return nil, 'Lightroom did not render this photo.'
+end
+
+local function process_windows(export_context, progress, binary, locate_err)
+	local advisories = {}
+	local failures = {}
+	local jobs = {}
+	-- Let the main session resolve Lightroom's names and destination, but render
+	-- one photo at a time elsewhere. A canceled native renderer can leave TIFFs
+	-- on disk even for renditions it reported as canceled.
+	for _, rendition in export_context.exportSession:renditions() do
+		if not rendition.wasSkipped then
+			jobs[#jobs + 1] = { rendition = rendition, destination = heic_path(rendition) }
+			rendition:skipRender()
+		end
+	end
+	progress:setCancelable(true)
+	local property_table = export_context.propertyTable
+	for i, job in ipairs(jobs) do
+		if progress:isCanceled() then break end
+		local rendition = job.rendition
+		local completed, failure, notes = LrFunctionContext.pcallWithContext('tohdr render', function(context)
+			if not binary then return locate_err or 'tohdr.exe not found' end
+			if LrFileUtils.exists(job.destination) then
+				return 'A file already exists at ' .. job.destination
+			end
+			local rendered_path, reason = render_in_scratch(context, property_table, rendition.photo)
+			if progress:isCanceled() then return end
+			if not rendered_path then return reason or 'Lightroom failed to render this photo' end
+			return convert_on_windows(binary, rendered_path, job.destination, property_table.tohdr_quality, progress)
+		end)
+		if not progress:isCanceled() then
+			if not completed or failure then
+				failures[#failures + 1] = LrPathUtils.leafName(job.destination) .. '\n' .. tostring(failure)
+			elseif notes then
+				TohdrCli.merge_advisories(advisories, notes)
+			end
+			progress:setPortionComplete(i, #jobs)
+		end
+	end
+	progress:done()
+	local summary = TohdrCli.summarize_advisories(advisories)
+	if #failures > 0 then
+		-- The primary renditions were skipped, so Lightroom does not collect
+		-- their uploadFailed results for the Export Results dialog.
+		if summary then failures[#failures + 1] = summary end
+		LrDialogs.message('Some photos could not be exported', table.concat(failures, '\n\n'), 'warning')
+	elseif summary then
+		LrDialogs.message('tohdr', summary, 'info')
+	end
 end
 
 function export_service_provider.processRenderedPhotos(_function_context, export_context)
@@ -190,6 +352,9 @@ function export_service_provider.processRenderedPhotos(_function_context, export
 	}
 
 	local binary, locate_err = find_binary(property_table)
+	if WIN_ENV then
+		return process_windows(export_context, progress, binary, locate_err)
+	end
 
 	-- Collected, not reported per photo: LrC has no per-photo channel for
 	-- "succeeded, but you should know", and 200 modal dialogs is not a design.
@@ -222,8 +387,7 @@ function export_service_provider.processRenderedPhotos(_function_context, export
 				local args = TohdrCli.build_convert_args(
 					property_table, rendered_path, out_path, raw_path
 				)
-				local cmd = TohdrCli.build_command_line(binary, args)
-				local status, output = run_capturing(cmd)
+				local status, output = run_capturing(binary, args)
 
 				if status ~= 0 then
 					rendition:uploadFailed(TohdrCli.summarize_failure(status, output))

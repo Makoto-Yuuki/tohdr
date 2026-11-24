@@ -11,10 +11,14 @@
 //! relative to `idat`'s own body, known immediately.
 
 use crate::boxes::{begin_box, begin_fullbox, end_box};
-use crate::{Chroma, ColourInfo, MuxRequest, Result};
+use crate::{Chroma, ColourInfo, Error, MuxRequest, Result};
 use std::collections::BTreeMap;
 
-pub(crate) fn mux(req: &MuxRequest) -> Result<Vec<u8>> {
+pub(crate) fn mux(req: &MuxRequest, base_size: (u32, u32)) -> Result<Vec<u8>> {
+    let coded_size = (req.base.width, req.base.height);
+    if base_size.0 > coded_size.0 || base_size.1 > coded_size.1 {
+        return Err(Error::Malformed("display size exceeds the coded base image".into()));
+    }
     let base_id: u32 = 1;
     let gain_id: u32 = 2;
     let mut next_id = 3u32;
@@ -107,6 +111,10 @@ pub(crate) fn mux(req: &MuxRequest) -> Result<Vec<u8>> {
         props.push(colr_box(c));
         assocs.push((base_id, props.len() as u16, true));
     }
+    if base_size != coded_size {
+        props.push(clap_box(base_size, coded_size));
+        assocs.push((base_id, props.len() as u16, true));
+    }
     push_transform(&mut props, &mut assocs, base_id, req.orientation);
 
     props.push(ispe_box(req.gain.width, req.gain.height));
@@ -138,7 +146,7 @@ pub(crate) fn mux(req: &MuxRequest) -> Result<Vec<u8>> {
         // Every image item, derived ones included, is expected to carry an
         // `ispe` per MIAF/HEIF; non-essential since it just restates the
         // base's own dimensions for generic-item-enumeration convenience.
-        props.push(ispe_box(req.base.width, req.base.height));
+        props.push(ispe_box(base_size.0, base_size.1));
         assocs.push((id, props.len() as u16, false));
         // `pixi` and `colr` are not decoration here. macOS ImageIO reports
         // `iso_aux = false` for an otherwise byte-valid `tmap` that lacks
@@ -463,6 +471,23 @@ fn ispe_box(width: u32, height: u32) -> Vec<u8> {
     let p = begin_fullbox(&mut b, b"ispe", 0, 0);
     b.extend_from_slice(&width.to_be_bytes());
     b.extend_from_slice(&height.to_be_bytes());
+    end_box(&mut b, p);
+    b
+}
+
+fn clap_box(display: (u32, u32), coded: (u32, u32)) -> Vec<u8> {
+    let mut b = Vec::new();
+    let p = begin_box(&mut b, b"clap");
+    // Width and height are integer rationals. The signed offsets move the
+    // aperture center left/up by half the padding, retaining the top-left origin.
+    for dimension in [display.0, display.1] {
+        b.extend_from_slice(&dimension.to_be_bytes());
+        b.extend_from_slice(&1u32.to_be_bytes());
+    }
+    for (size, padded) in [(display.0, coded.0), (display.1, coded.1)] {
+        b.extend_from_slice(&(size as i32 - padded as i32).to_be_bytes());
+        b.extend_from_slice(&2u32.to_be_bytes());
+    }
     end_box(&mut b, p);
     b
 }

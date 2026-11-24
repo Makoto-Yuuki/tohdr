@@ -41,6 +41,24 @@ end
 --- The dialog section. Returned as a one-element array per the
 --- sectionsForTopOfDialog contract.
 function M.sections_for_top_of_dialog(f, property_table)
+	if WIN_ENV then
+		return {
+			{
+				title = 'HDR Gain Map HEIC',
+				f:row {
+					f:static_text { title = 'Quality:' },
+					f:edit_field {
+						value = bind 'tohdr_quality',
+						precision = 0,
+						width_in_digits = 3,
+						min = 1,
+						max = 100,
+					},
+				},
+			},
+		}
+	end
+
 	local label_width = share 'tohdr_labelWidth'
 
 	return {

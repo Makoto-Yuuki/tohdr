@@ -7,12 +7,15 @@
 //! `todo!()`.
 
 mod batch;
+#[cfg(target_os = "macos")]
 mod bench;
 mod cli;
 mod convert;
 mod engine;
+#[cfg(target_os = "macos")]
 mod inspect;
 mod panic_guard;
+#[cfg(target_os = "macos")]
 mod verify;
 
 use clap::Parser;
@@ -25,8 +28,11 @@ fn main() {
     let result = match cli.command {
         Command::Convert(args) => convert::run(args),
         Command::Batch(args) => batch::run(args),
+        #[cfg(target_os = "macos")]
         Command::Inspect(args) => inspect::run(args),
+        #[cfg(target_os = "macos")]
         Command::Verify(args) => verify::run(args),
+        #[cfg(target_os = "macos")]
         Command::Bench(args) => bench::run(args),
     };
 

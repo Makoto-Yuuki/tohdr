@@ -203,6 +203,11 @@ pub fn convert_one(args: &ConvertArgs, progress: bool) -> anyhow::Result<Convert
     // headroom in it. See `tohdr_portable::gainmap_tiff`.
     let embedded = tohdr_portable::read_gainmap_tiff(&args.input)
         .with_context(|| format!("reading {}", args.input.display()))?;
+    if args.require_lightroom_gain_map
+        && !embedded.as_ref().is_some_and(|source| source.declared.alt_headroom > 0.0)
+    {
+        anyhow::bail!("Lightroom rendered no HDR gain map. Enable HDR editing for this photo and HDR Output with Maximize Compatibility for TIFF exports.");
+    }
 
     // Read before the pixels, and never fatal: a damaged or absent Exif block is
     // a reason to convert without metadata, not a reason to refuse the photo.
